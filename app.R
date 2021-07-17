@@ -22,11 +22,16 @@ library(tigris) # Get zip code list
 library(scales)
 library(gtfsFunctions) #devtools::install_github("b-tomhave/gtfsFunctions", force = TRUE)
 library(plyr) # For round_any
+library(readr)
 
 # Install these to use the aggregate_map function that was previously in tmaptools
 # library(devtools)
 # install_github("mtennekes/oldtmaptools")
 library(oldtmaptools)
+
+# Get API Key For Get_ACS From R Script Hidden From Github and load
+source("CensusAPIKey.R")
+#census_api_key(CENSUS_API_KEY, install = T, Overwirte = T)
 
 # Allow input zip file to be up to 200mb in size
 options(shiny.maxRequestSize = 200*1024^2)
@@ -132,7 +137,7 @@ names(keyVarName) <- keyVarDescription
 ##############################################################################
 # UI Side of App
 ##############################################################################
-ui <-navbarPage("Routes & Stops Viewer", id="nav",
+ui <-navbarPage("Shiny Census", id="nav",
                 # Map Page
                 
                 # Tab 1: Filtered ACS Mapping ----------------------------------
@@ -141,7 +146,7 @@ ui <-navbarPage("Routes & Stops Viewer", id="nav",
                              
                              tags$head(
                                  # Include custom CSS
-                                 includeCSS("styles.css")
+                                 includeCSS("www/styles.css")
                              ),
                              tmapOutput("filteredAcsMap", width="100%", height="100%"),
                              # Input Selections for Tab 2
@@ -183,6 +188,7 @@ ui <-navbarPage("Routes & Stops Viewer", id="nav",
                                            uiOutput("formattedPctBipocSlider"),
                                            uiOutput("formattedHHIncomeSlider"),
                                            uiOutput("formattedPctBelowPovertySlider"),
+                                           textOutput("tractCount"),
                                            br(),
                                            uiOutput("acsTableSelect2UI"),
                                            paste("Data From:", acsYear, "ACS")
@@ -197,7 +203,7 @@ ui <-navbarPage("Routes & Stops Viewer", id="nav",
                              
                              tags$head(
                                  # Include custom CSS
-                                 includeCSS("styles.css")
+                                 includeCSS("www/styles.css")
                              ),
                              
                              # If not using custom CSS, set height of leafletOutput to a number instead of percent
@@ -270,6 +276,7 @@ server <- function(input, output, session, ...) {
         # If by state abbreviation...
         if (input$inputGeomMethod == 1){
             filteredACSTracts <- get_acs(
+                key = CENSUS_API_KEY,
                 geography = "tract",
                 variables = as.character(filterMapVarName),
                 state = input$acsStateSelect2,
@@ -284,7 +291,8 @@ server <- function(input, output, session, ...) {
                                                                   variables = as.character(filterMapVarName),
                                                                   geography = "tract",
                                                                   year = acsYear,
-                                                                  survey = "acs5")
+                                                                  survey = "acs5",
+                                                                  tidyCensusAPIKey = CENSUS_API_KEY)
         }
         
 
@@ -327,17 +335,17 @@ server <- function(input, output, session, ...) {
         
         finalFilteredVarsList <- list(list("TotalPop", "Total Population"),
                                       list("Pct_Total_Age25_50", "% Population Ages 25-50"),
-                                      list("PctWhite","% Population (White)"),
                                       list("PctBIPOC","% Population (BIPOC)"),
+                                      list("MedianHHInc","Median HH Income (2016$)"),
+                                      list("PctBelowPoverty","% Below Poverty Line"),
+                                      list("PctAtOrAbvPoverty","% At or Above Poverty Line"),
+                                      list("PctZeroCarHH","% 0-Car HH"),
+                                      list("PctWhite","% Population (White)"),
                                       list("PctBlack","% Population (Black)"),
                                       list("PctAsian","% Population (Asian)"),
                                       list("PctHispLatino","% Population (Hispanic/Latino)"),
-                                      list("PctZeroCarHH","% 0-Car HH"),
                                       list("PctTransit2Wrk","% Transit to Work"),
                                       list("PctWalk2Wrk","% Walk to Work"),
-                                      list("PctBelowPoverty","% Below Poverty Line"),
-                                      list("PctAtOrAbvPoverty","% At or Above Poverty Line"),
-                                      list("MedianHHInc","Median HH Income (2016$)"),
                                       list("MedianGrossRent","Median Gross Rent (2016$)"))
         
         formatted_finalFilteredVarsList <- unlist(lapply(finalFilteredVarsList, `[[`, 1))
@@ -484,35 +492,42 @@ server <- function(input, output, session, ...) {
             fillLabels2 = NULL
             legendTitle2 = names(formatted_finalFilteredVarsList)[formatted_finalFilteredVarsList == input$acsTableSelect2]
             
-            # Remove records with empty geometry/units and plot
-            updatedMap2 <-  tm_shape(mappingTable[!st_is_empty(mappingTable), ], unit = "mi") +
-                tmap_options(max.categories = palletBinNumber) +  # Set Max Number of levels
-                tm_fill(
-                    group = "ACS Data Layer",
-                    col = "colorCol",
-                    n = palletBinNumber, # 5 colors
-                    labels = fillLabels2,
-                    palette = colorPal2,
-                    style = cloroplethStyle2,
-                    breaks = breakVals2,
-                    contrast = c(0.3, 1),
-                    title = legendTitle2,
-                    textNA = "Not Available",
-                    colorNA = "gray",
-                    id = "NAME",
-                    popup.vars = popupText2
-                ) +
-                tm_borders(col = "darkgray") +
-                tm_view(
-                    alpha = 0.5,
-                    view.legend.position = c("left", "bottom"),
-                    leaflet.options = 
-                )+
-              tm_basemap(c(leaflet::providers$Stamen.Toner,
-                           leaflet::providers$Esri.WorldImagery,
-                           leaflet::providers$OpenStreetMap, leaflet::providers$CartoDB.Positron))
-            # Update Map
-            output$filteredAcsMap <- renderTmap({updatedMap2})
+            # Remove records with empty geometry/units and plot if any records remain
+            if (nrow(mappingTable[!st_is_empty(mappingTable), ]) !=0){
+              updatedMap2 <-  tm_shape(mappingTable[!st_is_empty(mappingTable), ], unit = "mi") +
+                  tmap_options(max.categories = palletBinNumber) +  # Set Max Number of levels
+                  tm_fill(
+                      group = "ACS Data Layer",
+                      col = "colorCol",
+                      n = palletBinNumber, # 5 colors
+                      labels = fillLabels2,
+                      palette = colorPal2,
+                      style = cloroplethStyle2,
+                      breaks = breakVals2,
+                      contrast = c(0.3, 1),
+                      title = legendTitle2,
+                      textNA = "Not Available",
+                      colorNA = "gray",
+                      id = "NAME",
+                      popup.vars = popupText2
+                  ) +
+                  tm_borders(col = "darkgray") +
+                  tm_view(
+                      alpha = 0.5,
+                      view.legend.position = c("left", "bottom"),
+                      leaflet.options = 
+                  )+
+                tm_basemap(c(leaflet::providers$Stamen.Toner,
+                             leaflet::providers$Esri.WorldImagery,
+                             leaflet::providers$OpenStreetMap, leaflet::providers$CartoDB.Positron))
+              # Update Map
+              output$filteredAcsMap <- renderTmap({updatedMap2})
+              
+              # No output Text
+              output$tractCount <- renderText({paste(nrow(mappingTable[!st_is_empty(mappingTable), ]), "tracts meet criteria.")})
+            }else{
+              output$tractCount <- renderText({"NO TRACTS for selected filter(s). Change filters to update map"})
+            }
         })
     })
     
@@ -545,6 +560,7 @@ server <- function(input, output, session, ...) {
   observeEvent(input$loadDataButton,{
     req(input$acsStateSelect)
     currentSelectedStateTracts <- get_acs(
+      key = CENSUS_API_KEY,
       geography = "tract",
       variables = c(input$acsTableSelect, "B01003_001"),
       state = input$acsStateSelect,

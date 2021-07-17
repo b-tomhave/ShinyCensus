@@ -1,3 +1,9 @@
+#Shinyapps.io files
+rsconnect/*
+
+# Get_ACS API Key FIle
+CensusAPIKey.R
+
 # Mac Files
 .DS_Store
 
