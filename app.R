@@ -23,6 +23,8 @@ library(scales)
 library(gtfsFunctions) #devtools::install_github("b-tomhave/gtfsFunctions", force = TRUE)
 library(plyr) # For round_any
 library(readr)
+library(htmlTable) # For popup table
+library(leafpop)
 
 # Install these to use the aggregate_map function that was previously in tmaptools
 # library(devtools)
@@ -96,7 +98,9 @@ filterMapVars <- list(list("B01003_001", "[B01003_001] Total Population"),
                       list("B17001_031", "[B17001_031] Population with at or above poverty-level income"),
                       list("B19013_001", "[B19013_001] Median Household income in past 12 months (in selected year $)"),
                       list("B25064_001", "[B25064_001] Median Gross Rent"),
-                      list("B08201_002", "[B08201_002] Zero-Vehicle Households"))
+                      list("B08201_002", "[B08201_002] Zero-Vehicle Households"),
+                      list("C17002_001", "[C17002_001] PAll population for poverty threshold"),
+                      list("C17002_008", "[C17002_002] Population living above 200% the poverty threshold"))
 
 filterMapVarName <- unlist(lapply(filterMapVars, `[[`, 1))
 filterMapVarDescription <- unlist(lapply(filterMapVars, `[[`, 2))
@@ -148,7 +152,7 @@ ui <-navbarPage("Shiny Census", id="nav",
                                  # Include custom CSS
                                  includeCSS("www/styles.css")
                              ),
-                             tmapOutput("filteredAcsMap", width="100%", height="100%"),
+                             leafletOutput("filteredAcsMap", width="100%", height="100%"),
                              # Input Selections for Tab 2
                              absolutePanel(id = "controls2", class = "panel panel-default", fixed = TRUE,
                                            draggable = TRUE, top = 60, left = "auto", right = 20, bottom = "auto",
@@ -168,7 +172,7 @@ ui <-navbarPage("Shiny Census", id="nav",
                                                    choices = unique(fips_codes$state),
                                                    selected = NULL,
                                                    multiple = TRUE,
-                                                   selectize = TRUE
+                                                   selectize = F
                                                )
                                            ),
                                            
@@ -222,7 +226,7 @@ ui <-navbarPage("Shiny Census", id="nav",
                                                choices = unique(fips_codes$state),
                                                selected = NULL,
                                                multiple = TRUE,
-                                               selectize = TRUE
+                                               selectize = F
                                            ),
                                            selectInput(
                                                "keyVarSwitch",
@@ -230,7 +234,7 @@ ui <-navbarPage("Shiny Census", id="nav",
                                                choices = c("Key Variables Only", "All Variables"),
                                                selected = "Key Variables Only", 
                                                multiple = F,
-                                               selectize = TRUE
+                                               selectize = F
                                            ),
                                            selectizeInput('acsTableSelect',
                                                           label = 'Select Table/Variable Name',
@@ -266,15 +270,46 @@ ui <-navbarPage("Shiny Census", id="nav",
 server <- function(input, output, session, ...) {
     
     # Tab 1: ACS Map Filtering ---------------------------------
-    # Create Render UI for GTFS Input box
-    #inputGeomMethod
-    
+    # Load Default Map
+    output$filteredAcsMap <- renderLeaflet({
+      leaflet()%>%
+        #Add Basemap Options
+        addProviderTiles(providers$CartoDB.Positron,
+                         group   = "Sketch (Default)")%>%
+        addProviderTiles(providers$Stamen.Toner,
+                         group   = "Black & White")%>%
+        addProviderTiles(providers$OpenStreetMap,
+                         group   = "OpenStreetMap")%>%
+        addProviderTiles(providers$Esri.WorldImagery,
+                         group   = "Aerial")%>%
+        setView(lat = 39.809253334942575,
+                lng = -98.55663889876627,
+                zoom = 5)%>%
+        #Reset Zoom Button
+        addEasyButton(easyButton(
+          icon = 'fa-home',
+          title = 'Reset view',
+          onClick =  JS("function(btn, map) {
+                           var groupLayer = map.layerManager.getLayerGroup('filteredTracts');
+                           map.fitBounds(groupLayer.getBounds());
+                        }"
+          )))%>%
+        # Layers control
+        addLayersControl(
+          baseGroups = c("Sketch (Default)", "Black & White", "OpenStreetMap","Aerial"),
+          options    = layersControlOptions(collapsed = T),
+          position = c("topleft"))%>%
+        addMeasure(position = c("topleft")) #Add distance (and area measure)
+  })
 
     # Update acs data selection based on file selection and get all variables specified in filterMapVars
     observeEvent(input$loadDataButton2,{
         # Load Data Differently Depending on if by state abbreviation of GTFS
         # If by state abbreviation...
         if (input$inputGeomMethod == 1){
+          req(input$acsStateSelect2)
+          
+          # Can only run 25 variables in one go so for more this executes twice
             filteredACSTracts <- get_acs(
                 key = CENSUS_API_KEY,
                 geography = "tract",
@@ -284,7 +319,7 @@ server <- function(input, output, session, ...) {
                 survey = "acs5",
                 geometry = TRUE,
                 output = "wide" # get data in wide format for easier mapping
-            )
+            )%>%st_transform(crs=4326)
         }
         else if(input$inputGeomMethod == 2){
             filteredACSTracts <- gtfsFunctions::getServiceAreaACS(gtfsFunctions::formatGTFSObject(input$selectInputFile$datapath),
@@ -292,8 +327,15 @@ server <- function(input, output, session, ...) {
                                                                   geography = "tract",
                                                                   year = acsYear,
                                                                   survey = "acs5",
-                                                                  tidyCensusAPIKey = CENSUS_API_KEY)
+                                                                  tidyCensusAPIKey = CENSUS_API_KEY)%>%st_transform(crs=4326)
         }
+      
+
+        # Set Map View to Data Extent:
+        bbox <- st_bbox(filteredACSTracts)%>%as.vector()
+      
+        leafletProxy("filteredAcsMap") %>%
+          fitBounds(bbox[1], bbox[2], bbox[3], bbox[4])
         
 
         # Create Custom ACS Columns
@@ -329,16 +371,24 @@ server <- function(input, output, session, ...) {
         filteredACSTracts$PctAtOrAbvPoverty   <- round(100*(filteredACSTracts$B17001_031E/filteredACSTracts$TotalPop),1)
         filteredACSTracts$PctZeroCarHH        <- round(100*(filteredACSTracts$B08201_002E/filteredACSTracts$TotalPop),1)
         
+        #Poverty
+        filteredACSTracts$PopBelow200PctPovertyLevel<- filteredACSTracts$C17002_001E - filteredACSTracts$C17002_008E
+        filteredACSTracts$PctBelow2TimesPovLevel        <- round(100*(filteredACSTracts$PopBelow200PctPovertyLevel/filteredACSTracts$C17002_001E),1)
+        
+        
+        
         # Other Non Pct Vars
         filteredACSTracts$MedianHHInc   <- filteredACSTracts$B19013_001E
         filteredACSTracts$MedianGrossRent   <- filteredACSTracts$B25064_001E
         
-        finalFilteredVarsList <- list(list("TotalPop", "Total Population"),
+        finalFilteredVarsList <- list(#list("GEOID", "GEOID"),
+                                      list("TotalPop", "Total Population"),
                                       list("Pct_Total_Age25_50", "% Population Ages 25-50"),
                                       list("PctBIPOC","% Population (BIPOC)"),
                                       list("MedianHHInc","Median HH Income (2016$)"),
                                       list("PctBelowPoverty","% Below Poverty Line"),
                                       list("PctAtOrAbvPoverty","% At or Above Poverty Line"),
+                                      list("PctBelow2TimesPovLevel", "% Population Below 2x Poverty Line"),
                                       list("PctZeroCarHH","% 0-Car HH"),
                                       list("PctWhite","% Population (White)"),
                                       list("PctBlack","% Population (Black)"),
@@ -475,56 +525,55 @@ server <- function(input, output, session, ...) {
             # Subset Table By Filters
             mappingTable <- mappingTable%>%filter(MedianHHInc >= input$formattedHHIncomeSlider_raw[1] & MedianHHInc <= input$formattedHHIncomeSlider_raw[2]  & PctBIPOC >= input$formattedPctBipocSlider_raw[1] & PctBIPOC <= input$formattedPctBipocSlider_raw[2] & Pct_Total_Age25_50 >= input$formattedPctAge25_50Slider_raw[1] & Pct_Total_Age25_50 <= input$formattedPctAge25_50Slider_raw[2] & PctBelowPoverty >= input$formattedPctBelowPovertySlider_raw[1] & PctBelowPoverty <= input$formattedPctBelowPovertySlider_raw[2])
             
-  
-            # Set Style for Cloropleth Filtered Map
-            popupText2 = c("Total Tract Population: " = "TotalPop",
-                           "% BIPOC: " = "PctBIPOC",
-                           "% Aged 25-50: " = "Pct_Total_Age25_50",
-                           "% Taking Transit to Work: " = "PctTransit2Wrk",
-                           "% Below Poverty Line: " = "PctBelowPoverty",
-                           "Median HH Income: " = "MedianHHInc",
-                           "Selected Variable: " = "colorCol")
-            
-            # Set Cloropleth/Map Formatting
-            cloroplethStyle2 = "fisher"
-            colorPal2 = "Greens"
-            breakVals2 = NULL
-            fillLabels2 = NULL
-            legendTitle2 = names(formatted_finalFilteredVarsList)[formatted_finalFilteredVarsList == input$acsTableSelect2]
+
+            #Remove Empty Rows From Table
+            nonEmptyMappingTable <- mappingTable[!st_is_empty(mappingTable), ]
             
             # Remove records with empty geometry/units and plot if any records remain
-            if (nrow(mappingTable[!st_is_empty(mappingTable), ]) !=0){
-              updatedMap2 <-  tm_shape(mappingTable[!st_is_empty(mappingTable), ], unit = "mi") +
-                  tmap_options(max.categories = palletBinNumber) +  # Set Max Number of levels
-                  tm_fill(
-                      group = "ACS Data Layer",
-                      col = "colorCol",
-                      n = palletBinNumber, # 5 colors
-                      labels = fillLabels2,
-                      palette = colorPal2,
-                      style = cloroplethStyle2,
-                      breaks = breakVals2,
-                      contrast = c(0.3, 1),
-                      title = legendTitle2,
-                      textNA = "Not Available",
-                      colorNA = "gray",
-                      id = "NAME",
-                      popup.vars = popupText2
-                  ) +
-                  tm_borders(col = "darkgray") +
-                  tm_view(
-                      alpha = 0.5,
-                      view.legend.position = c("left", "bottom"),
-                      leaflet.options = 
-                  )+
-                tm_basemap(c(leaflet::providers$Stamen.Toner,
-                             leaflet::providers$Esri.WorldImagery,
-                             leaflet::providers$OpenStreetMap, leaflet::providers$CartoDB.Positron))
-              # Update Map
-              output$filteredAcsMap <- renderTmap({updatedMap2})
+            if (nrow(nonEmptyMappingTable) !=0){
+              # Load Palette
+              filteredLeafletPal <- colorBin("Greens", nonEmptyMappingTable$colorCol,
+                                             palletBinNumber, pretty = FALSE)
               
+              # Create Columns for Popup
+              nonEmptyMappingTable$`Total Tract Population` <- prettyNum(nonEmptyMappingTable$TotalPop, big.mark = ",")
+              nonEmptyMappingTable$`BIPOC` <- paste(prettyNum(nonEmptyMappingTable$PctBIPOC, big.mark = ","), "%")
+              nonEmptyMappingTable$`Aged 25-50` <- paste(nonEmptyMappingTable$Pct_Total_Age25_50, "%")
+              nonEmptyMappingTable$`Taking Transit to Work` <- paste(nonEmptyMappingTable$PctTransit2Wrk, "%")
+              nonEmptyMappingTable$`Below Poverty Line` <- paste(nonEmptyMappingTable$PctBelowPoverty, "%")
+              nonEmptyMappingTable$`Median HH Income` <- prettyNum(nonEmptyMappingTable$MedianHHInc, big.mark = ",")
+              nonEmptyMappingTable$`Selected Variable` <- prettyNum(nonEmptyMappingTable$colorCol, big.mark = ",")
+              
+              # Update Map
+              leafletProxy("filteredAcsMap") %>%
+                clearGroup(group = "filteredTracts")%>%
+                clearControls()%>%
+                addPolygons(data = st_transform(nonEmptyMappingTable, crs = 4326),
+                            #layerId = ~GEOID,
+                            group = "filteredTracts",
+                            fillColor = ~filteredLeafletPal(colorCol),
+                            color = "grey",
+                            fillOpacity = 0.4,
+                            weight = 1,
+                            smoothFactor = 0.2,
+                            popup = popupTable(st_drop_geometry(nonEmptyMappingTable[, c("Total Tract Population","BIPOC",
+                                                                                         "Aged 25-50", "Taking Transit to Work",
+                                                                                         "Below Poverty Line", "Median HH Income",
+                                                                                         "Selected Variable")]),
+                                               row.numbers = FALSE,
+                                               feature.id = FALSE),
+
+                            highlightOptions = highlightOptions(color = "Purple", weight = 4,
+                                                                bringToFront = T))%>%
+                  addLegend("bottomleft", pal = filteredLeafletPal, values = st_transform(nonEmptyMappingTable)$colorCol,
+                            title = names(formatted_finalFilteredVarsList)[formatted_finalFilteredVarsList == input$acsTableSelect2],
+                            labFormat = labelFormat(big.mark = ",", digits = 0),
+                            opacity = 1
+                  )
+
+                
               # No output Text
-              output$tractCount <- renderText({paste(nrow(mappingTable[!st_is_empty(mappingTable), ]), "tracts meet criteria.")})
+              output$tractCount <- renderText({paste(nrow(nonEmptyMappingTable), "tracts meet criteria.")})
             }else{
               output$tractCount <- renderText({"NO TRACTS for selected filter(s). Change filters to update map"})
             }
@@ -628,6 +677,10 @@ server <- function(input, output, session, ...) {
       )
     # Update Map
     output$acsMap <- renderTmap({updatedMap})
+    
+    # highlightOptions = highlightOptions(color = "white",
+    #                                     weight = 5, bringToFront = F, opacity = 1)
+
   })
   
   
